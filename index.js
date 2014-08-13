@@ -17,8 +17,8 @@ function unimplemented() { throw new Error('unimplemented') }
 function Cache(opts) {
   if (!this || this === global) return new Cache(opts)
 
-  if (typeof opts == 'string') opts = { path: opts }
-  if (typeof opts.path != 'string') throw new TypeError('path must be a string')
+  if (typeof opts === 'string') opts = { path: opts }
+  if (typeof opts.path !== 'string') throw new TypeError('path must be a string')
 
   this.path = opts.path + ''
   this.paranoid = !!opts.paranoid
@@ -39,10 +39,10 @@ Cache.prototype.createReadStream = function(digest) { var self = this
   var output = through()
 
   if (!RE_HEX.test(digest)) {
-    return output
     process.nextTick(function() {
       output.emit('error', new Error('not a valid hash: `' + digest + '`'))
     })
+    return output
   }
 
   var pending = this.__pending[digest]
@@ -75,13 +75,16 @@ Cache.prototype.__acquire = function(args, pending, safe) { var self = this
     , error = errorFn(pending)
 
   var paranoidRead = this.paranoid && !safe
-    , fd = typeof safe == 'number' ? safe : null
+    , fd = typeof safe === 'number' ? safe : null
 
-  var input = fs.createReadStream(this._storePath(digest), { autoClose: !paranoidRead, fd: fd, start: 0 })
-      .on('error', function(err) {
-        if (err.code !== 'ENOENT') return error(err)
-        self.__acquireFresh(args, pending)
-      })
+  var input = fs.createReadStream(
+    this._storePath(digest),
+    { autoClose: !paranoidRead, fd: fd, start: 0 }
+  ).on('error', function(err) {
+    if (err.code !== 'ENOENT') return error(err)
+
+    self.__acquireFresh(args, pending)
+  })
 
   if (!paranoidRead) return input.on('open', function() { this.pipe(pending) })
 
@@ -100,7 +103,7 @@ Cache.prototype.__acquireFresh = function(args, pending) { var self = this
     , tmp = this._tmpPath(digest)
     , error = errorFn(pending)
 
-  mkdirp(Path.dirname(tmp), function(err) { if (err) error(err); else writeStream() })
+  mkdirp(Path.dirname(tmp), function(err) { if (err) { error(err) } else { writeStream()} })
 
   var output
   function writeStream() {
@@ -198,7 +201,7 @@ Cache.prototype.__acquireWatch = function(args, pending) { var self = this
   if (self.timeout) setTimeout(checkStale, 100)
   function checkStale() {
     fs.stat(tmp, function(err, stats) {
-      if (!watcher) return
+      if (!watcher) return null
       if (err && err.code === 'ENOENT') return retry()
       if (err) return error(err)
 
@@ -210,7 +213,7 @@ Cache.prototype.__acquireWatch = function(args, pending) { var self = this
 
       // stale file. goodbye!
       fs.unlink(tmp, function(err) {
-        if (err && err.code === 'ENOENT') return
+        if (err && err.code === 'ENOENT') return null
         if (err) return error(err)
         retry()
       })
@@ -223,7 +226,7 @@ Cache.prototype.__hash = function(stream, digest, cb) {
   return stream
     .on('data', function(chunk) { hash.update(chunk) })
     .on('end', function() {
-      var actualDigest = Buffer(hash.digest()).toString('hex')
+      var actualDigest = new Buffer(hash.digest()).toString('hex')
       if (actualDigest === digest) return cb()
       var err = new Error('hashes did not match. expected `' + digest + '`, got `' + actualDigest + '`')
       err.expected = digest
