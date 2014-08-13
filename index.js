@@ -4,6 +4,8 @@ module.exports = Cache
 var Path = require('path')
   , assert = require('assert')
   , fs = require('fs')
+  , randomBytes = require('crypto').randomBytes
+  , Readable = require('stream').Readable
   , mkdirp = require('mkdirp')
   , through = require('through')
   , concat = require('concat')
@@ -308,62 +310,83 @@ Cache.prototype.put = function (options, cb) {
 
   var self = this
 
-  if (options.stream) {
-    mkdirp(Path.join(this.path, 'tmp'), function(err) {
-      if (err) return cb(err)
-
-      var tmp = self._tmpPath(rand().toString(16))
-      var output = fs.createWriteStream(tmp)
-      output.on('error', cb)
-      output.on('finish', function () {
-        if (!options.digest) {
-          return sha.get(tmp, {algorithm : self.hash}, function (err, digest) {
-            if (err) {
-              cb(err)
-              return
-            }
-
-            self.put({file : tmp, digest : digest}, cb)
-          })
-        }
-
-        self.put({file : tmp, digest : options.digest})
-      })
-      options.stream.pipe(output)
-    })
-  }
-  else if (options.file) {
+  if (options.file) {
     if (!options.digest) {
-      return sha.get(options.file, {algorithm : self.hash}, function (err, digest) {
+      return sha.get(options.file, {algorithm : self.hash}, function(err, digest) {
         if (err) return cb(err)
 
         self.put({file : options.file, digest : digest}, cb)
       })
     }
 
-    sha.check(options.file, options.digest, {algorithm : this.hash}, function (err) {
+    var stored = this._storePath(options.digest)
+    mkdirp(Path.dirname(stored), function(err) {
       if (err) return cb(err)
 
-      var stored = self._storePath(options.digest)
-      mkdirp(Path.dirname(stored), function (err) {
-        if (err) return cb(err)
-
-        fs.rename(options.file, stored, function (err) {
-          if (err) return cb(err)
-
+      fs.createReadStream(options.file)
+        .on('error', cb)
+        .pipe(sha.stream(options.digest, {algorithm : self.hash}))
+        .pipe(fs.createWriteStream(stored))
+        .on('finish', function() {
           cb(null, options.digest)
         })
-      })
     })
+
+    return null
   }
 
-  function rand() {
-    return (Math.random() * 0xFFFFFFFF) | 0
+  mkdirp(Path.join(this.path, 'tmp'), function(err) {
+    if (err) return cb(err)
+
+    var tmp = self._tmpPath(randomBytes(16).toString('hex'))
+    var output = fs.createWriteStream(tmp)
+    output.on('error', cb)
+
+    var stream
+    if (options.contents) {
+      stream = new Readable()
+      stream.push(options.contents)
+      stream.push(null)
+    }
+    else { // options.stream
+      stream = options.stream
+    }
+
+    if (!options.digest) {
+      output.on('finish', function() {
+        sha.get(tmp, {algorithm : self.hash}, function(err, digest) {
+          if (err) return cb(err)
+
+          place(digest, tmp, cb)
+        })
+      })
+    }
+    else {
+      stream = stream.pipe(sha.stream(options.digest, {algorithm : self.hash}))
+      output.on('finish', function() { place(options.digest, tmp, cb) })
+    }
+
+    stream.pipe(output)
+  })
+
+  function place(digest, source, cb) {
+    var target = self._storePath(digest)
+    mkdirp(Path.dirname(target), function(err) {
+      if (err) return cb(err)
+
+      fs.rename(source, target, function() { cb(null, digest) })
+    })
   }
 }
 
 Cache.prototype.remove = function (digest, cb) {
-  var goner = this._storePath(digest)
+  assert(digest, 'must pass digest to remove')
+  assert(cb, 'must pass callback in to remove')
+
+  var cleaned = String(digest).toLowerCase()
+  assert(RE_HEX.test(cleaned), 'not a valid hash: `' + cleaned + '`')
+
+  var goner = this._storePath(cleaned)
   fs.unlink(goner, cb)
 }
 
