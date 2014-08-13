@@ -1,9 +1,14 @@
-'use strict';
+'use strict'
+
 module.exports = Cache
 var Path = require('path')
+  , assert = require('assert')
   , fs = require('fs')
   , mkdirp = require('mkdirp')
   , through = require('through')
+  , concat = require('concat')
+  , once = require('once')
+  , sha = require('sha')
   , RE_HEX = /^[0-9a-f]{32,}$/
 
 function noop() {}
@@ -19,6 +24,7 @@ function Cache(opts) {
   this.paranoid = !!opts.paranoid
   this.timeout = opts.timeout | 0
   this.__pending = Object.create(null)
+  this.hash = opts.hash
 }
 
 Cache.prototype._storePath = function(digest) { return Path.join(this.path, 'store', digest) }
@@ -224,6 +230,138 @@ Cache.prototype.__hash = function(stream, digest, cb) {
       err.actual = actualDigest
       cb(err)
     })
+}
+
+/**
+ * type can be:
+ *   "stream": a stream of the contents of the cached object (default)
+ *   "contents": a Buffer containing the contents of the cached object
+ *   "file": write the response to 'file' on disk, requires "path" option
+ *   "null": discard the object and just validate the object
+ */
+Cache.prototype.get = function (digest, options, cb) {
+  assert(cb, 'must pass callback in to get')
+  assert(digest, 'must include the digest to fetch from the cache')
+
+  var cleaned = String(digest).toLowerCase()
+  assert(RE_HEX.test(cleaned), 'not a valid hash: `' + cleaned + '`')
+
+  options = options || {}
+  var responseType = options.type || 'stream'
+  if (responseType === 'file') {
+    assert(options.path, 'must include path when writing to file')
+  }
+
+  var cached = this._storePath(cleaned)
+  var input, output
+  switch (responseType) {
+    case 'stream':
+      input = fs.createReadStream(cached)
+      input.on('error', cb)
+
+      input.pipe(sha.stream(digest, {algorithm : this.hash}))
+      input.on('open', function () { cb(null, input) })
+      break
+
+    case 'contents':
+      fs.createReadStream(cached)
+        .pipe(sha.stream(digest, {algorithm : this.hash}))
+        .pipe(concat(cb))
+      break
+
+    case 'file':
+      var onced = once(cb)
+      input = fs.createReadStream(cached)
+      input.on('error', onced)
+
+      output = fs.createWriteStream(options.path)
+      output.on('error', onced)
+
+      input.pipe(output).on('finish', function() {
+        onced(null, options.path)
+      })
+      break
+
+    case 'null':
+      fs.createReadStream(cached)
+        .pipe(sha.stream(digest, {algorithm : this.hash}))
+        .on('finish', function() {
+           cb()
+        })
+      break
+
+    default:
+      throw new Error('unrecognized response type ' + responseType)
+  }
+}
+
+Cache.prototype.put = function (options, cb) {
+  assert(options, 'must include options to put')
+  assert(
+    options.stream || options.contents || options.file,
+    'must include one of a stream, object contents, or file name'
+  )
+  assert(cb, 'must pass callback in to put')
+
+  var self = this
+
+  if (options.stream) {
+    mkdirp(Path.join(this.path, 'tmp'), function(err) {
+      if (err) return cb(err)
+
+      var tmp = self._tmpPath(rand().toString(16))
+      var output = fs.createWriteStream(tmp)
+      output.on('error', cb)
+      output.on('finish', function () {
+        if (!options.digest) {
+          return sha.get(tmp, {algorithm : self.hash}, function (err, digest) {
+            if (err) {
+              cb(err)
+              return
+            }
+
+            self.put({file : tmp, digest : digest}, cb)
+          })
+        }
+
+        self.put({file : tmp, digest : options.digest})
+      })
+      options.stream.pipe(output)
+    })
+  }
+  else if (options.file) {
+    if (!options.digest) {
+      return sha.get(options.file, {algorithm : self.hash}, function (err, digest) {
+        if (err) return cb(err)
+
+        self.put({file : options.file, digest : digest}, cb)
+      })
+    }
+
+    sha.check(options.file, options.digest, {algorithm : this.hash}, function (err) {
+      if (err) return cb(err)
+
+      var stored = self._storePath(options.digest)
+      mkdirp(Path.dirname(stored), function (err) {
+        if (err) return cb(err)
+
+        fs.rename(options.file, stored, function (err) {
+          if (err) return cb(err)
+
+          cb(null, options.digest)
+        })
+      })
+    })
+  }
+
+  function rand() {
+    return (Math.random() * 0xFFFFFFFF) | 0
+  }
+}
+
+Cache.prototype.remove = function (digest, cb) {
+  var goner = this._storePath(digest)
+  fs.unlink(goner, cb)
 }
 
 function errorFn(pending) {
